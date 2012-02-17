@@ -45,7 +45,7 @@ whiteSpace = Token.whiteSpace tokenizer
 doubleColon = reservedOp "::"
 doubleColonEqual = reservedOp "::="
 -- This isn't right, it doesn't handle spacing right around the quotes
-prefix = between  (char '\'') (char '\'') (many1 (alphaNum <|> char '_')) <* whiteSpace
+prefix = between  (char '\'') (char '\'') (many (alphaNum <|> char '_')) <* whiteSpace
 
 endWithDoubleColon = manyTill (identifier <|> operator) (try (reservedOp "::"))
 
