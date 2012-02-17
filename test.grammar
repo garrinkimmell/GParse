@@ -1,0 +1,32 @@
+grammar
+  t :: '_foo' ::=  {{com What is this }} {{trellys And this}}
+  	| a t :: :: A {{com What is that}}
+  	| b v :: :: B
+  v :: '_foo' ::=  {{com What is this }}
+  	| x  :: :: V
+
+defns
+PredicateBetaEq :: 'PBEq_' ::=
+  defn
+  t =b t :: :: pbeq :: 'beta' 
+  {{ harley this is a hom }}
+  by
+
+  t =b t'
+  t =b t'  
+  -------------- :: Foo
+  a t =b a t'
+
+
+  ----------  :: Bar
+  b x =b b x
+
+
+  defn
+  v =a v :: :: asdfas :: 'beta'
+
+  by
+
+
+  ------------  :: Baz
+  x =a x
