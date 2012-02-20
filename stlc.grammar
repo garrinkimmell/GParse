@@ -1,0 +1,63 @@
+grammar
+
+  t :: '_term' ::=  {{com Lambda calculus }} 
+  	| t1 t2 :: :: App {{com Application}}
+  	| \ var : ty . t' :: :: Lam {{com Abstraction}}
+        | x  :: :: Var {{ Variables }}
+        | c    :: :: Const {{Constant}}
+
+  ty :: '_typ' ::=
+     | b :: :: TBase {{com Base Type}}
+     | ty1 -> ty2 :: :: TArrow {{com Arrow Type}}
+
+  var,x,y :: '_variables' ::=  {{com Variables }}
+
+
+  G :: '_context' ::= {{com Typing contexts}}
+    | .             :: :: EmptyCtx
+    | G , bnd  :: :: ExtendCtx
+
+  bnd :: '_binding' ::= {{com Binding }}
+    | var : ty    :: :: Bind
+
+    
+
+defns
+Typing :: 'Typ_' ::=
+   defn
+   G |- t : ty :: :: typ :: 'typing'
+   {{Typing judgment}}
+   by
+
+   -----------------------  :: BaseAx
+      G  |- c : b
+
+
+   G , var1 : ty1 |- t1 : ty2
+   ----------------------------------------  :: Lam
+   G |- \ var1 : ty1 . t' : ty1 -> ty2
+
+
+   G |- t1 : ty1 -> ty2
+   G |- t2 : ty1
+   ----------------------- :: App
+   G |- t1 t2 : ty2
+
+    var1 : ty1 elem G
+   ----------------------- :: Var
+    G |- var1 : ty1  
+
+
+   defn
+   bnd elem G :: :: ctx :: 'inctx'
+   {{ Binding in context}}
+   by
+   
+   ------------------------------  :: CtxBase
+   var1 : ty1 elem G , var1 : ty1
+
+   var1 : ty1 elem G
+   ------------------------------- :: CtxStep
+   var1 : ty1 elem G , var2 : ty2
+
+
