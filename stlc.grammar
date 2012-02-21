@@ -1,8 +1,9 @@
 grammar
 
-  t :: '_term' ::=  {{com Lambda calculus }} 
+  t :: '_term' ::=  {{com Lambda calculus }}
   	| t1 t2 :: :: App {{com Application}}
   	| \ var : ty . t' :: :: Lam {{com Abstraction}}
+           {{ tex \lambda [[var]] : [[ty]] . [[t']]}}
         | x  :: :: Var {{ Variables }}
         | c    :: :: Const {{Constant}}
 

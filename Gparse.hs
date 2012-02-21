@@ -2,6 +2,7 @@
 module Gparse where
 
 
+
 import Text.Parsec
 import Text.Parsec.Indent
 import qualified Data.Set as S
@@ -12,9 +13,12 @@ import Control.Applicative hiding ((<|>),many)
 import Data.Functor.Identity
 import Data.Maybe(catMaybes)
 import Control.Monad(guard)
-import Data.List(partition,intersperse,groupBy,sortBy)
-import Data.Char(isAlpha,isAlphaNum)
+import Data.List(partition,intersperse,groupBy,sortBy,elemIndex)
+import Data.Char(isAlpha,isAlphaNum,toUpper)
 import Data.Maybe(fromJust)
+import qualified  Text.PrettyPrint as PP
+import Text.PrettyPrint(text,(<+>),hang,(<>),punctuate,vcat,hcat,hsep)
+import qualified Data.Text as T
 
 import GHC.Exts(the,groupWith)
 -- emptyDef   :: Token.GenLanguageDef st
@@ -40,7 +44,7 @@ identifier = Token.identifier tokenizer
 reserved = Token.reserved tokenizer
 reservedOp = Token.reservedOp tokenizer
 commaSep1 = Token.commaSep1 tokenizer
-symbol = Token.symbol tokenizer
+symbol i = (Token.symbol tokenizer i) <?> ("Literal Symbol: " ++ i)
 operator = Token.operator tokenizer
 whiteSpace = Token.whiteSpace tokenizer
 
@@ -87,12 +91,12 @@ bind = do symbol "(+"
 rhs = do
   symbol "|" <?> "Beginning of RHS"
   tokens <- manyTill (identifier <|> operator) (try (reservedOp "::")) <?> "RHS terms"
-  manyTill (identifier <|> operator) (try (reservedOp "::"))
+  opts <- manyTill (symbol "S" <|> symbol "M") (try (reservedOp "::"))
   constructor <- identifier <?> "Constructor name" -- Should check
                  -- this begins uppercase
   binds <- many bind
   homs <- many hom
-  return $ RHS tokens constructor homs
+  return $ RHS tokens constructor homs opts
 
 data Language a = Language Grammar (Judgments a)
 
@@ -114,9 +118,9 @@ instance Show NonTerm where
                                unlines ["\t" ++ show r | r <- rhs ]
 
 
-data RHS = RHS [String] String [Hom]
+data RHS = RHS [String] String [Hom] [String]
 instance Show RHS where
-  show (RHS tokens nm homs) = unwords tokens ++ " :: " ++ nm
+  show (RHS tokens nm homs _) = unwords tokens ++ " :: " ++ nm ++ (concat $ map show homs)
 
 type Judgments a = [Judgment a]
 
@@ -178,7 +182,6 @@ lineParser = do pos <- getPosition
                 cs <- manyTill anyChar (try newline) <* whiteSpace
                 return (pos,cs)
 
-
 anyterm = (operator <|> identifier) <?> "Any Term"
 
 
@@ -189,7 +192,7 @@ nontermNames rules = S.fromList (concat [ns | NonTerm ns _ _ <- rules])
 
 type Parser a = ParsecT String () Identity a
 data AST = Leaf String |
-           Node String [AST] | -- Constructor, Arguments
+           Node String String [AST] | -- Constructor, Type, Arguments
            MetaVar String String
          deriving Show
 
@@ -206,32 +209,34 @@ makeTermParsers g = parsers
         -- Build a parser for a particular non-terminal
         parseNonterm :: NonTerm -> [(String,Parser AST)]
         parseNonterm (NonTerm ns rhss _) =
-          let isLeftRecursive (RHS (e:es) _ _) = (stripMeta e) `elem` ns
+          let isLeftRecursive (RHS (e:es) _ _ _) = (stripMeta e) `elem` ns
               isLeftRecursive r = error $ show r
               (rec,base) = partition isLeftRecursive rhss
-              rec' = [RHS es b r | RHS (e:es) b r <- rec]
-              baseParser = choice $ map metavar ns ++ [parseRHS r | r <- base]
-              restParser = choice [parseRHS' r | r <- rec']
+              rec' = [RHS es b r meta | RHS (e:es) b r meta <- rec]
+              -- Whole lot of try's required here. Left-factoring the
+              -- grammar should eliminate those.
+              baseParser = choice $ map metavar ns ++
+                           [try $ parseRHS (head ns) r | r <- base]
+              restParser = choice [try $ parseRHS' (head ns) r | r <- rec']
               p = do hd <- baseParser
                      rest <- many restParser
                      return $ foldl (\l r -> r l) hd rest
-
           in  [(n,p) | n <- ns]
 
 
-        parseRHS ::  RHS -> Parser AST
-        parseRHS (RHS tokens cons _) =
-          Node cons <$> sequence (map parseToken tokens)
+        parseRHS ::  String -> RHS -> Parser AST
+        parseRHS ty (RHS tokens cons _ _) =
+          Node cons ty <$> sequence (map parseToken tokens)
 
-        parseRHS' :: RHS -> Parser (AST -> AST)
-        parseRHS' (RHS tokens cons _) = do
+        parseRHS' :: String -> RHS -> Parser (AST -> AST)
+        parseRHS' ty (RHS tokens cons _ _) = do
           args <- sequence (map parseToken tokens)
-          return $ \arg -> Node cons (arg:args)
+          return $ \arg -> Node cons ty (arg:args)
 
         parseToken :: String -> Parser AST
         parseToken t
           | (stripMeta t) `S.member` nonterms =
-            let ~(Just p) = M.lookup (stripMeta t) parsers in p
+            let ~(Just p) = M.lookup (stripMeta t) parsers in (p <?> "nonterminal: " ++ stripMeta t)
           | otherwise = Leaf <$> symbol t
 
         -- Remove the metavariable indices. FIXME: This is temporary,
@@ -239,14 +244,15 @@ makeTermParsers g = parsers
         stripMeta t = let t'= takeWhile isAlpha t
                       in if t' `S.member` nonterms then t' else t
 
-metavar nm = do symbol nm
-                suffix <- many (digit <|> char '\'')
-                whiteSpace
-                return $ MetaVar nm suffix
+metavar nm = try $ do
+  symbol nm
+  suffix <- many (digit <|> char '\'')
+  whiteSpace
+  return $ MetaVar nm suffix
 
 
 makeJudgmentParser :: String -> [String] -> M.Map String (Parser AST) -> Parser AST
-makeJudgmentParser name tokens termParsers  = Node name <$> mapM mkTokenParser tokens
+makeJudgmentParser name tokens termParsers  = Node name "judgment" <$> mapM mkTokenParser tokens
   where mkTokenParser token
           | Just nt <- M.lookup (stripSuffix token) termParsers = nt
           | otherwise = Leaf <$> symbol token
@@ -276,15 +282,20 @@ parseGrammar fname = do
   f <- readFile fname
   case runIdentity (runPT (whiteSpace *> language <* eof) () fname f) of
     Left err ->  fail (show err)
-    Right (Language grammar judgments,parser) ->
-      return $ (grammar, judgments, makeTermParsers grammar)
+    Right (Language grammar judgments,parser) -> do
+      let homs = homGrammar grammar
+          pprint htype = applyHom homs htype
+      return $ (grammar, judgments, makeTermParsers grammar,pprint)
 
 
 -- Printing
 
 
 run p s = runIndent "<test>" (runPT (whiteSpace *> p <* whiteSpace <* eof) () "<test>" s)
-run' p s = (runPT (whiteSpace *> p <* whiteSpace <* eof) () "<test>" s)
+run' p s =
+  case runIdentity (runPT (whiteSpace *> p <* whiteSpace <* eof) () "<test>" s) of
+    Left err -> error $ show err
+    Right val -> return val
 test  = unlines [
   "grammar",
   "t :: '_foo' ::=  {{com What is this }}",
@@ -295,19 +306,13 @@ test  = unlines [
 
   ]
 
+anotherTest = do
+  (g,js,ps,pprint)  <- parseGrammar "sep.ott"
+  let Just p = M.lookup "P" ps
+  r <- run' p "(\\ L x : A' .\\ L x1 : A. P1 )"
+  print $ pprint "tex" r
 
-
--- Refactoring junk.
-exprGrammar = [NonTerm ["expr"] [RHS ["expr", "+", "expr"] "Add" [],
-                                RHS ["expr", "-", "expr"] "Sub" [],
-                                RHS ["num"] "Num" []]
-
-               [],
-               NonTerm ["num"] [RHS ["z"] "Zero" [],
-                                RHS ["s","num"] "Suc" []
-                               ] []
-              ]
-
+{-
 
 data Factored = FLeaf RHS
               | FCommon String Factored
@@ -316,11 +321,11 @@ data Factored = FLeaf RHS
 
 -- factor :: NonTerm -> [NonTerm]
 norec nt@(NonTerm ns rhs homs) = (removed, simple)
-  where isLeftRecursive (RHS (e:es) _ []) = e `elem` ns
+  where isLeftRecursive (RHS (e:es) _ [] _) = e `elem` ns
         (rec,base) = partition isLeftRecursive rhs
         simple = NonTerm (map (++ "_term") ns) base homs
         removed = NonTerm ns
-                  [RHS ((n ++ "_term"):es) nm hom | RHS (e:es) nm hom <- rec, n <- ns] []
+                  [RHS ((n ++ "_term"):es) nm hom meta | RHS (e:es) nm hom meta <- rec, n <- ns] []
 
 factorNT (NonTerm ns rhs _) = (ns,factor rhs)
 
@@ -328,17 +333,17 @@ factorNT (NonTerm ns rhs _) = (ns,factor rhs)
 
 factor [r] = FLeaf r
 factor rhs = FAlt (map mkNode rest)
-  where groupHead (RHS (x:xs) _ _) (RHS (y:ys) _ _) = x == y
+  where groupHead (RHS (x:xs) _ _ _) (RHS (y:ys) _ _ _) = x == y
         groupHead _ _ = False
-        ruleHead (RHS (x:_) _ _) = x
-        ruleTail (RHS (_:xs) a b) = RHS xs a b
-        compareHead (RHS (x:xs) _  _) (RHS (y:ys) _ _) = compare x y
+        ruleHead (RHS (x:_) _ _ _) = x
+        ruleTail (RHS (_:xs) a b c) = RHS xs a b c
+        compareHead (RHS (x:xs) _ _ _) (RHS (y:ys) _ _ _) = compare x y
         mkNode (n,[r]) = FLeaf r
         mkNode (n,ts) = FCommon n (factor (map ruleTail ts))
-        rest = [ (head (head tokens), rule) | rule@(RHS tokens _ _) <- rhs, then group by (head tokens) using groupWith]
+        rest = [ (head (head tokens), rule) | rule@(RHS tokens _ _ _) <- rhs, then group by (head tokens) using groupWith]
 
 parseRHS :: [AST] -> RHS -> Parser AST
-parseRHS accum (RHS tokens cons _) = do
+parseRHS accum (RHS tokens cons _ _) = do
   args <- sequence (map parseToken tokens)
   return (Node cons (accum ++ args))
 
@@ -350,3 +355,81 @@ parseFactored accum (FCommon t rest) = do
   tast <- parseToken t
   parseFactored (accum ++ [tast]) rest
 parseFactored accum (FAlt fs) = choice (map (parseFactored accum) fs)
+
+-}
+
+-- * Hom support
+homGrammar g =
+  [((cty,cname),rhsHom rule) | NonTerm (cty:ns) rhss _ <- g,
+   rule@(RHS tokens cname homs _) <- rhss
+   ]
+
+applyHom _ _ n@(MetaVar t s) = text t <> text s
+applyHom _ _ (Leaf s) = text s
+applyHom table htype n@(Node cname tname args) =
+  case lookup htype homs of
+    Just hom -> subHom hom
+    Nothing -> hsep $ map (applyHom table htype) args
+  where Just homs = lookup (tname,cname) table
+        subHom ((HomLit s):rest) = text s <> subHom rest
+        subHom ((HomVar i):rest) =
+          applyHom table htype (args !! i) <> subHom rest
+        subHom [] = PP.empty
+
+
+rhsHom (RHS tokens cnm homs _) = parsedHoms
+  -- Build a map from metavar to list position
+  where
+    parsedHoms = [(n,locHoms $ parseHom (T.pack h)) | (n,h) <- homs]
+    locHoms [] = []
+    locHoms ((HomLit s):hs) = HomLit s:locHoms hs
+    locHoms ((HomVar n):hs) = let Just loc = elemIndex n tokens
+                              in HomVar loc:locHoms hs
+
+
+data HomSpec a = HomLit String | HomVar a deriving Show
+
+parseHom str = s1 str
+  where s1 s =
+          case T.breakOn (T.pack "[[") s of
+            (start,rest)
+              | T.null rest -> [HomLit (T.unpack start)]
+              | otherwise -> HomLit (T.unpack start):(st2 (T.drop 2 rest))
+        st2 s =
+          case T.breakOn (T.pack "]]") s of
+            (start,rest)
+              | T.null start -> [HomLit $ "[[" ++ (T.unpack s)]
+              | otherwise ->
+                   (HomVar (T.unpack (T.strip start))):s1 (T.drop 2 rest)
+
+
+-- * Generate Haskell Datatypes
+toHask  g = PP.cat $ map toData g
+  where nonterms = S.fromList [n | NonTerm ns rhs homs <- g, n <- ns]
+        ucase (n:ns) = toUpper n:ns
+        toData (NonTerm (n:ns) rhs _) =
+          hang (text "data" <+> (text $ ucase n) <+> text "=") 2
+            (vcat $ punctuate (text "|") [toCons r (typeName n) | r <- rhs, notMeta r])
+
+        toCons (RHS tokens nm _  []) ty =
+          constructor nm ty <+>
+          hsep [text $ typeName (stripMeta t) | t <- tokens,
+                   stripMeta t `S.member` nonterms]
+
+        typeNames = M.fromList [(from,ucase to) | NonTerm nms@(to:ns) _ _ <- g, from <- nms]
+        typeName t = let (Just nm) = M.lookup t typeNames in nm
+        stripMeta t = let t'= takeWhile isAlpha t
+                      in if t' `S.member` nonterms then t' else t
+        notMeta (RHS _ _ _ []) = True
+        notMeta _ = False
+        -- If a constructor appears in more than one type then we have
+        -- to do something to make it unique. We just prepend the name
+        -- of the constructor.
+        constructors :: [(String,Int)]
+        constructors = [(the (map ucase cname),length cname) | NonTerm _ rhss _ <- g,
+                        RHS _ cname _ _ <- rhss,
+                        then group by (ucase cname) using groupWith]
+        constructor n ty
+          | Just i <- lookup (ucase n) constructors, i > 1 =
+              text ty <> text "_" <> text (ucase n)
+          | otherwise = text (ucase n)
