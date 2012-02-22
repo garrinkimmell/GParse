@@ -363,8 +363,9 @@ homGrammar g =
   [((cty,cname),rhsHom rule) | NonTerm (cty:ns) rhss _ <- g,
    rule@(RHS tokens cname homs _) <- rhss
    ]
-
-applyHom _ _ n@(MetaVar t s) = text t <> text s
+applyHom _ _ n@(MetaVar t "'") = text t <> text "'"
+applyHom _ _ n@(MetaVar t "") = text t
+applyHom _ _ n@(MetaVar t s) = text t <> text "_" <> PP.braces (text s)
 applyHom _ _ (Leaf s) = text s
 applyHom table htype n@(Node cname tname args) =
   case lookup htype homs of
